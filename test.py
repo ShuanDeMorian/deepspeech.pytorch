@@ -20,11 +20,18 @@ parser.add_argument('--save-output', default=None, help="Saves output of model f
 parser = add_decoder_args(parser)
 
 
-def evaluate(test_loader, device, model, decoder, target_decoder, save_output=False, verbose=False, half=False):
+def evaluate(test_loader, device, model, decoder, target_decoder, save_output=None, verbose=False, half=False,horovod=False):
     model.eval()
     total_cer, total_wer, num_tokens, num_chars = 0, 0, 0, 0
     output_data = []
-    for i, (data) in tqdm(enumerate(test_loader), total=len(test_loader)):
+    
+    if horovod:
+        d = enumerate(test_loader)
+    else:
+        d = tqdm(enumerate(test_loader), total=len(test_loader))
+        
+#     for i, (data) in tqdm(enumerate(test_loader), total=len(test_loader)):
+    for i, (data) in d:
         inputs, targets, input_percentages, target_sizes = data
         input_sizes = input_percentages.mul_(int(inputs.size(3))).int()
         inputs = inputs.to(device)

@@ -222,6 +222,7 @@ class DeepSpeech(nn.Module):
     @classmethod
     def load_model(cls, path):
         package = torch.load(path, map_location=lambda storage, loc: storage)
+#         package = torch.load(path)
         model = cls(rnn_hidden_size=package['hidden_size'],
                     nb_layers=package['hidden_layers'],
                     labels=package['labels'],

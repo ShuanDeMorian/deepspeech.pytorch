@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import argparse
 import warnings
 
@@ -33,7 +34,8 @@ def decode_results(decoded_output, decoded_offsets):
             }
         }
     }
-
+    
+    print(decoded_output)
     for b in range(len(decoded_output)):
         for pi in range(min(args.top_paths, len(decoded_output[b]))):
             result = {'transcription': decoded_output[b][pi]}

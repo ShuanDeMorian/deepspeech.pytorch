@@ -7,8 +7,8 @@ import time
 import numpy as np
 import torch.distributed as dist
 import torch.utils.data.distributed
-from apex import amp
-from apex.parallel import DistributedDataParallel
+# from apex import amp
+# from apex.parallel import DistributedDataParallel
 from warpctc_pytorch import CTCLoss
 
 from data.data_loader import AudioDataLoader, SpectrogramDataset, BucketingSampler, DistributedBucketingSampler
@@ -17,6 +17,9 @@ from logger import VisdomLogger, TensorBoardLogger
 from model import DeepSpeech, supported_rnns
 from test import evaluate
 from utils import reduce_tensor, check_loss
+
+import torch.utils.data.distributed
+import horovod.torch as hvd
 
 parser = argparse.ArgumentParser(description='DeepSpeech training')
 parser.add_argument('--train-manifest', metavar='DIR',
@@ -48,7 +51,7 @@ parser.add_argument('--log-dir', default='visualize/deepspeech_final', help='Loc
 parser.add_argument('--log-params', dest='log_params', action='store_true', help='Log parameter values and gradients')
 parser.add_argument('--id', default='Deepspeech training', help='Identifier for visdom/tensorboard run')
 parser.add_argument('--save-folder', default='models/', help='Location to save epoch models')
-parser.add_argument('--model-path', default='models/deepspeech_final.pth',
+parser.add_argument('--model-path', default='models/deepspeech_horovod_final.pth',
                     help='Location to save best validation model')
 parser.add_argument('--continue-from', default='', help='Continue from checkpoint model')
 parser.add_argument('--finetune', dest='finetune', action='store_true',
@@ -82,6 +85,10 @@ parser.add_argument('--opt-level', type=str)
 parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
 parser.add_argument('--loss-scale', default=1,
                     help='Loss scaling used by Apex. Default is 1 due to warp-ctc not supporting scaling of gradients')
+# horovod
+parser.add_argument('--use_adasum', default=False, help='horovod use adasum')
+parser.add_argument('--fp16_allreduce', default=False, help='horovod fp16_allreduce')
+
 
 torch.manual_seed(123456)
 torch.cuda.manual_seed_all(123456)
@@ -112,23 +119,37 @@ class AverageMeter(object):
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    
+    # Horovod: initialize library.
+    hvd.init()
+    
+    if args.cuda:
+        # Horovod: pin GPU to local rank.
+        torch.cuda.set_device(hvd.local_rank())
+        torch.cuda.manual_seed(args.seed)
 
     # Set seeds for determinism
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
+    
+    # Horovod: limit # of CPU threads to be used per worker.
+    torch.set_num_threads(1)
+    kwargs = {'num_workers': 1, 'pin_memory': True} if args.cuda else {}
 
     device = torch.device("cuda" if args.cuda else "cpu")
-    args.distributed = args.world_size > 1
-    main_proc = True
+#     args.distributed = args.world_size > 1
+    args.distributed = True
+#     main_proc = True
+    main_proc = hvd.rank() == 0
     device = torch.device("cuda" if args.cuda else "cpu")
-    if args.distributed:
-        if args.gpu_rank:
-            torch.cuda.set_device(int(args.gpu_rank))
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
-        main_proc = args.rank == 0  # Only the first proc should save models
+#     if args.distributed:
+#         if args.gpu_rank:
+#             torch.cuda.set_device(int(args.gpu_rank))
+#         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+#                                 world_size=args.world_size, rank=args.rank)
+#         main_proc = args.rank == 0  # Only the first proc should save models
     save_folder = args.save_folder
     os.makedirs(save_folder, exist_ok=True)  # Ensure save folder exists
 
@@ -149,7 +170,7 @@ if __name__ == '__main__':
         audio_conf = model.audio_conf
         if not args.finetune:  # Don't want to restart training
             optim_state = package['optim_dict']
-            amp_state = package['amp']
+#             amp_state = package['amp']
             start_epoch = int(package.get('epoch', 1)) - 1  # Index start at 0 for training
             start_iter = package.get('iteration', None)
             if start_iter is None:
@@ -191,38 +212,81 @@ if __name__ == '__main__':
                                        normalize=True, speed_volume_perturb=args.speed_volume_perturb, spec_augment=args.spec_augment)
     test_dataset = SpectrogramDataset(audio_conf=audio_conf, manifest_filepath=args.val_manifest, labels=labels,
                                       normalize=True, speed_volume_perturb=False, spec_augment=False)
-    if not args.distributed:
-        train_sampler = BucketingSampler(train_dataset, batch_size=args.batch_size)
-    else:
-        train_sampler = DistributedBucketingSampler(train_dataset, batch_size=args.batch_size,
-                                                    num_replicas=args.world_size, rank=args.rank)
+    
+#     if not args.distributed:
+#         train_sampler = BucketingSampler(train_dataset, batch_size=args.batch_size)
+#     else:
+    train_sampler = DistributedBucketingSampler(train_dataset, batch_size=args.batch_size,
+                                                    num_replicas=hvd.size(), rank=hvd.rank())
+    test_sampler = DistributedBucketingSampler(test_dataset, batch_size=args.batch_size,
+                                                    num_replicas=hvd.size(), rank=hvd.rank())    
+    # Horovod: use DistributedSampler to partition the training data.
+#     train_sampler = torch.utils.data.distributed.DistributedSampler(
+#         train_dataset, num_replicas=hvd.size(), rank=hvd.rank())
+#     train_loader = torch.utils.data.DataLoader(
+#         train_dataset, batch_size=args.batch_size, sampler=train_sampler, **kwargs)
+    
+    # Horovod: use DistributedSampler to partition the test data.
+#     test_sampler = torch.utils.data.distributed.DistributedSampler(
+#         test_dataset, num_replicas=hvd.size(), rank=hvd.rank())
+#     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=args.batch_size,
+#                                               sampler=test_sampler, **kwargs)
+
     train_loader = AudioDataLoader(train_dataset,
                                    num_workers=args.num_workers, batch_sampler=train_sampler)
-    test_loader = AudioDataLoader(test_dataset, batch_size=args.batch_size,
-                                  num_workers=args.num_workers)
+    test_loader = AudioDataLoader(test_dataset,
+                                  num_workers=args.num_workers, batch_sampler=test_sampler)
 
     if (not args.no_shuffle and start_epoch != 0) or args.no_sorta_grad:
         print("Shuffling batches for the following epochs")
         train_sampler.shuffle(start_epoch)
+#         # Horovod: set epoch to sampler for shuffling.
+#         train_sampler.set_epoch(start_epoch)
+        
+        
+    # By default, Adasum doesn't need scaling up learning rate.
+    lr_scaler = hvd.size() if not args.use_adasum else 1
 
     model = model.to(device)
+    
+    if device == 'cuda':
+        # If using GPU Adasum allreduce, scale learning rate by local_size.
+        if args.use_adasum and hvd.nccl_built():
+            lr_scaler = hvd.local_size()
+    
     parameters = model.parameters()
-    optimizer = torch.optim.SGD(parameters, lr=args.lr,
+    # Horovod: scale learning rate by lr_scaler.
+    optimizer = torch.optim.SGD(parameters, lr=args.lr * lr_scaler,
                                 momentum=args.momentum, nesterov=True, weight_decay=1e-5)
 
-    model, optimizer = amp.initialize(model, optimizer,
-                                      opt_level=args.opt_level,
-                                      keep_batchnorm_fp32=args.keep_batchnorm_fp32,
-                                      loss_scale=args.loss_scale)
-
+#     model, optimizer = amp.initialize(model, optimizer,
+#                                       opt_level=args.opt_level,
+#                                       keep_batchnorm_fp32=args.keep_batchnorm_fp32,
+#                                       loss_scale=args.loss_scale)
+    
     if optim_state is not None:
         optimizer.load_state_dict(optim_state)
 
-    if amp_state is not None:
-        amp.load_state_dict(amp_state)
+#     if amp_state is not None:
+#         amp.load_state_dict(amp_state)
 
-    if args.distributed:
-        model = DistributedDataParallel(model)
+#     if args.distributed:
+#         model = DistributedDataParallel(model)
+        
+    # Horovod: broadcast parameters & optimizer state.
+    hvd.broadcast_parameters(model.state_dict(), root_rank=0)
+    hvd.broadcast_optimizer_state(optimizer, root_rank=0)
+
+    # Horovod: (optional) compression algorithm.
+    compression = hvd.Compression.fp16 if args.fp16_allreduce else hvd.Compression.none
+
+    # Horovod: wrap optimizer with DistributedOptimizer.
+    optimizer = hvd.DistributedOptimizer(optimizer,
+                                         named_parameters=model.named_parameters(),
+                                         compression=compression,
+                                         op=hvd.Adasum if args.use_adasum else hvd.Average)
+        
+        
     print(model)
     print("Number of parameters: %d" % DeepSpeech.get_param_size(model))
 
@@ -230,11 +294,23 @@ if __name__ == '__main__':
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
+    
+    # Temp
+    amp = None
+    
+    def metric_average(val, name):
+            tensor = torch.tensor(val)
+            avg_tensor = hvd.allreduce(tensor, name=name)
+            return avg_tensor.item()
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
         end = time.time()
         start_epoch_time = time.time()
+        
+        # Horovod: set epoch to sampler for shuffling.
+#         train_sampler.set_epoch(epoch)
+        
         for i, (data) in enumerate(train_loader, start=start_iter):
             if i == len(train_sampler):
                 break
@@ -251,21 +327,27 @@ if __name__ == '__main__':
             loss = criterion(float_out, targets, output_sizes, target_sizes).to(device)
             loss = loss / inputs.size(0)  # average the loss by minibatch
 
-            if args.distributed:
-                loss = loss.to(device)
-                loss_value = reduce_tensor(loss, args.world_size).item()
-            else:
-                loss_value = loss.item()
+#             if args.distributed:
+#                 loss = loss.to(device)
+# #                 loss_value = reduce_tensor(loss, args.world_size).item()
+# #                 loss_value = reduce_tensor(loss, hvd.size()).item()
+#                 loss_value = metric_average(loss,'loss')                
+#             else:
+#                 loss_value = loss.item()
+                
+            loss_value = loss.item()
 
             # Check to ensure valid loss was calculated
             valid_loss, error = check_loss(loss, loss_value)
             if valid_loss:
                 optimizer.zero_grad()
                 # compute gradient
+                
+                loss.backward()
 
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_norm)
+#                 with amp.scale_loss(loss, optimizer) as scaled_loss:
+#                     scaled_loss.backward()
+#                 torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_norm)
                 optimizer.step()
             else:
                 print(error)
@@ -278,7 +360,7 @@ if __name__ == '__main__':
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
-            if not args.silent:
+            if not args.silent: # and hvd.rank() == 0: 
                 print('Epoch: [{0}][{1}/{2}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -306,7 +388,8 @@ if __name__ == '__main__':
                                              device=device,
                                              model=model,
                                              decoder=decoder,
-                                             target_decoder=decoder)
+                                             target_decoder=decoder,
+                                             horovod=True)
         loss_results[epoch] = avg_loss
         wer_results[epoch] = wer
         cer_results[epoch] = cer
@@ -329,6 +412,10 @@ if __name__ == '__main__':
                 'Avg WER': wer,
                 'Avg CER': cer
             }
+
+
+
+        
 
         if main_proc and args.checkpoint:
             file_path = '%s/deepspeech_%d.pth.tar' % (save_folder, epoch + 1)
