@@ -412,9 +412,6 @@ if __name__ == '__main__':
                 'Avg WER': wer,
                 'Avg CER': cer
             }
-
-
-
         
 
         if main_proc and args.checkpoint:
@@ -438,3 +435,4 @@ if __name__ == '__main__':
         if not args.no_shuffle:
             print("Shuffling batches...")
             train_sampler.shuffle(epoch)
+            

@@ -85,4 +85,5 @@ if __name__ == '__main__':
                                                  decoder=decoder,
                                                  device=device,
                                                  use_half=args.half)
-    print(json.dumps(decode_results(decoded_output, decoded_offsets)))
+#     print(json.dumps(decode_results(decoded_output, decoded_offsets)))
+    decode_results(decoded_output, decoded_offsets)
