@@ -26,7 +26,7 @@ parser.add_argument('--val-manifest', metavar='DIR',
 parser.add_argument('--sample-rate', default=16000, type=int, help='Sample rate')
 parser.add_argument('--batch-size', default=20, type=int, help='Batch size for training')
 parser.add_argument('--num-workers', default=4, type=int, help='Number of workers used in data-loading')
-parser.add_argument('--labels-path', default='labels.json', help='Contains all characters for transcription')
+parser.add_argument('--labels-path', default='labels-clean.json', type=str, help='Contains all characters for transcription')
 parser.add_argument('--window-size', default=.02, type=float, help='Window size for spectrogram in seconds')
 parser.add_argument('--window-stride', default=.01, type=float, help='Window stride for spectrogram in seconds')
 parser.add_argument('--window', default='hamming', help='Window type for spectrogram generation')
@@ -57,7 +57,7 @@ parser.add_argument('--speed-volume-perturb', dest='speed_volume_perturb', actio
 parser.add_argument('--spec-augment', dest='spec_augment', action='store_true', help='Use simple spectral augmentation on mel spectograms.')
 parser.add_argument('--noise-dir', default=None,
                     help='Directory to inject noise into audio. If default, noise Inject not added')
-parser.add_argument('--noise-prob', default=0.4, help='Probability of noise being added per sample')
+parser.add_argument('--noise-prob', default=0.6, type=float, help='Probability of noise being added per sample')
 parser.add_argument('--noise-min', default=0.0,
                     help='Minimum noise level to sample from. (1.0 means all noise, not original signal)', type=float)
 parser.add_argument('--noise-max', default=0.5,
@@ -82,6 +82,10 @@ parser.add_argument('--opt-level', type=str)
 parser.add_argument('--keep-batchnorm-fp32', type=str, default=None)
 parser.add_argument('--loss-scale', default=1,
                     help='Loss scaling used by Apex. Default is 1 due to warp-ctc not supporting scaling of gradients')
+parser.add_argument('--no-final', action='store_true', default=False,
+                    help='Turn off save (better werq)final model')
+parser.add_argument('--use-jamo', action='store_true', default=False,
+                    help='use jamo')
 
 torch.manual_seed(123456)
 torch.cuda.manual_seed_all(123456)
@@ -147,6 +151,14 @@ if __name__ == '__main__':
         model = DeepSpeech.load_model_package(package)
         labels = model.labels
         audio_conf = model.audio_conf
+        
+        if args.noise_dir is not None:
+            if args.noise_dir == 'none':
+                args.noise_dir = None
+            audio_conf['noise_dir'] = args.noise_dir
+            audio_conf['noise_prob'] = args.noise_prob
+            model.audio_conf = audio_conf
+        
         if not args.finetune:  # Don't want to restart training
             optim_state = package['optim_dict']
             amp_state = package['amp']
@@ -175,7 +187,8 @@ if __name__ == '__main__':
                           window=args.window,
                           noise_dir=args.noise_dir,
                           noise_prob=args.noise_prob,
-                          noise_levels=(args.noise_min, args.noise_max))
+                          noise_levels=(args.noise_min, args.noise_max),
+                          use_jamo=args.use_jamo)                         # Jamo
 
         rnn_type = args.rnn_type.lower()
         assert rnn_type in supported_rnns, "rnn_type should be either lstm, rnn or gru"
@@ -209,14 +222,16 @@ if __name__ == '__main__':
     parameters = model.parameters()
     optimizer = torch.optim.SGD(parameters, lr=args.lr,
                                 momentum=args.momentum, nesterov=True, weight_decay=1e-5)
+    
+#     optimizer = torch.optim.Adam(parameters, lr=args.lr)
 
     model, optimizer = amp.initialize(model, optimizer,
                                       opt_level=args.opt_level,
                                       keep_batchnorm_fp32=args.keep_batchnorm_fp32,
                                       loss_scale=args.loss_scale)
 
-    if optim_state is not None:
-        optimizer.load_state_dict(optim_state)
+#     if optim_state is not None:
+#         optimizer.load_state_dict(optim_state)
 
     if amp_state is not None:
         amp.load_state_dict(amp_state)
@@ -285,7 +300,8 @@ if __name__ == '__main__':
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'.format(
                     (epoch + 1), (i + 1), len(train_sampler), batch_time=batch_time, data_time=data_time, loss=losses))
             if args.checkpoint_per_batch > 0 and i > 0 and (i + 1) % args.checkpoint_per_batch == 0 and main_proc:
-                file_path = '%s/deepspeech_checkpoint_epoch_%d_iter_%d.pth' % (save_folder, epoch + 1, i + 1)
+#                 file_path = '%s/deepspeech_checkpoint_epoch_%d_iter_%d.pth' % (save_folder, epoch + 1, i + 1)
+                file_path = '%s/deepspeech_checkpoint_iter_%d.pth' % (save_folder, i + 1)
                 print("Saving checkpoint model to %s" % file_path)
                 torch.save(DeepSpeech.serialize(model, optimizer=optimizer, amp=amp, epoch=epoch, iteration=i,
                                                 loss_results=loss_results,
@@ -301,6 +317,7 @@ if __name__ == '__main__':
               'Average Loss {loss:.3f}\t'.format(epoch + 1, epoch_time=epoch_time, loss=avg_loss))
 
         start_iter = 0  # Reset start iteration for next epoch
+#         wer, cer, output_data = 0,0,None
         with torch.no_grad():
             wer, cer, output_data = evaluate(test_loader=test_loader,
                                              device=device,
@@ -331,7 +348,9 @@ if __name__ == '__main__':
             }
 
         if main_proc and args.checkpoint:
-            file_path = '%s/deepspeech_%d.pth.tar' % (save_folder, epoch + 1)
+#             file_path = '%s/deepspeech_%d.pth.tar' % (save_folder, epoch + 1)
+            print("save latest model")
+            file_path = '%s/deepspeech_latest.pth' % (save_folder)
             torch.save(DeepSpeech.serialize(model, optimizer=optimizer, amp=amp, epoch=epoch, loss_results=loss_results,
                                             wer_results=wer_results, cer_results=cer_results),
                        file_path)
@@ -340,7 +359,7 @@ if __name__ == '__main__':
             g['lr'] = g['lr'] / args.learning_anneal
         print('Learning rate annealed to: {lr:.6f}'.format(lr=g['lr']))
 
-        if main_proc and (best_wer is None or best_wer > wer):
+        if not args.no_final and main_proc and (best_wer is None or best_wer > wer):
             print("Found better validated model, saving to %s" % args.model_path)
             torch.save(DeepSpeech.serialize(model, optimizer=optimizer, amp=amp, epoch=epoch, loss_results=loss_results,
                                             wer_results=wer_results, cer_results=cer_results)

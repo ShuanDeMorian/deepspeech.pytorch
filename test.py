@@ -9,6 +9,8 @@ from decoder import GreedyDecoder
 from opts import add_decoder_args, add_inference_args
 from utils import load_model
 
+from hangul_utils import join_jamos
+
 parser = argparse.ArgumentParser(description='DeepSpeech transcription')
 parser = add_inference_args(parser)
 parser.add_argument('--test-manifest', metavar='DIR',
@@ -54,6 +56,14 @@ def evaluate(test_loader, device, model, decoder, target_decoder, save_output=No
             output_data.append((out.cpu().numpy(), output_sizes.numpy(), target_strings))
         for x in range(len(target_strings)):
             transcript, reference = decoded_output[x][0], target_strings[x][0]
+            
+            try:
+                if model.audio_conf['use_jamo']:
+                    transcript = join_jamos(transcript)
+                    reference = join_jamos(reference)
+            except:
+                None
+            
             wer_inst = decoder.wer(transcript, reference)
             cer_inst = decoder.cer(transcript, reference)
             total_wer += wer_inst
@@ -68,6 +78,7 @@ def evaluate(test_loader, device, model, decoder, target_decoder, save_output=No
     wer = float(total_wer) / num_tokens
     cer = float(total_cer) / num_chars
     return wer * 100, cer * 100, output_data
+#     return wer, cer, output_data
 
 
 if __name__ == '__main__':
@@ -105,3 +116,5 @@ if __name__ == '__main__':
           'Average CER {cer:.3f}\t'.format(wer=wer, cer=cer))
     if args.save_output is not None:
         np.save(args.save_output, output_data)
+#         torch.save(args.save_output,output_data)
+        print('save complete')
