@@ -16,12 +16,15 @@ from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 from .spec_augment import spec_augment
 
+from hangul_utils import split_syllable_char, split_syllables, join_jamos
+
 windows = {'hamming': scipy.signal.hamming, 'hann': scipy.signal.hann, 'blackman': scipy.signal.blackman,
            'bartlett': scipy.signal.bartlett}
 
 
 def load_audio(path):
-    sample_rate, sound = read(path)
+#     sample_rate, sound = read(path)
+    sound, sr = librosa.load(path, sr=16000)
     sound = sound.astype('float32') / 32767  # normalize audio
     if len(sound.shape) > 1:
         if sound.shape[1] == 1:
@@ -56,7 +59,7 @@ class NoiseInjection(object):
         Adds noise to an input signal with specific SNR. Higher the noise level, the more noise added.
         Modified code from https://github.com/willfrey/audio/blob/master/torchaudio/transforms.py
         """
-        if not os.path.exists(path):
+        if path is not None and not os.path.exists(path):
             print("Directory doesn't exist: {}".format(path))
             raise IOError
         self.paths = path is not None and librosa.util.find_files(path)
@@ -103,11 +106,20 @@ class SpectrogramParser(AudioParser):
             'noise_dir') is not None else None
         self.noise_prob = audio_conf.get('noise_prob')
 
-    def parse_audio(self, audio_path):
-        if self.speed_volume_perturb:
+    def parse_audio(self, audio_path,audio=None,change_speed=None):
+        if audio is not None:
+            y = audio
+        elif self.speed_volume_perturb:
             y = load_randomly_augmented_audio(audio_path, self.sample_rate)
+#             librosa.output.write_wav('test.wav', y, sr=16000, norm=False)
+#             print('test')
         else:
             y = load_audio(audio_path)
+            
+        # change audio speed
+        if change_speed is not None:
+            y = librosa.effects.time_stretch(y, change_speed)
+            
         if self.noiseInjector:
             add_noise = np.random.binomial(1, self.noise_prob)
             if add_noise:
@@ -159,6 +171,12 @@ class SpectrogramDataset(Dataset, SpectrogramParser):
         self.ids = ids
         self.size = len(ids)
         self.labels_map = dict([(labels[i], i) for i in range(len(labels))])
+
+        try:
+            self.use_jamo = audio_conf['use_jamo']
+        except:
+            self.use_jamo = False
+        
         super(SpectrogramDataset, self).__init__(audio_conf, normalize, speed_volume_perturb, spec_augment)
 
     def __getitem__(self, index):
@@ -166,12 +184,17 @@ class SpectrogramDataset(Dataset, SpectrogramParser):
         audio_path, transcript_path = sample[0], sample[1]
         spect = self.parse_audio(audio_path)
         transcript = self.parse_transcript(transcript_path)
+        
         return spect, transcript
 
     def parse_transcript(self, transcript_path):
         with open(transcript_path, 'r', encoding='utf8') as transcript_file:
 #         with open(transcript_path, 'r', encoding='utf-16') as transcript_file:
             transcript = transcript_file.read().replace('\n', '')
+    
+        if self.use_jamo:
+            transcript = split_syllables(transcript)
+    
         transcript = list(filter(None, [self.labels_map.get(x) for x in list(transcript)]))
         return transcript
 
@@ -308,7 +331,9 @@ def augment_audio_with_sox(path, sample_rate, tempo, gain):
         return y
 
 
-def load_randomly_augmented_audio(path, sample_rate=16000, tempo_range=(0.85, 1.15),
+# original tempo_range=(0.85,1.15)
+# original gain_range=(-6,8)
+def load_randomly_augmented_audio(path, sample_rate=16000, tempo_range=(0.85,1.15),
                                   gain_range=(-6, 8)):
     """
     Picks tempo and gain uniformly, applies it to the utterance by using sox utility.
@@ -320,4 +345,5 @@ def load_randomly_augmented_audio(path, sample_rate=16000, tempo_range=(0.85, 1.
     gain_value = np.random.uniform(low=low_gain, high=high_gain)
     audio = augment_audio_with_sox(path=path, sample_rate=sample_rate,
                                    tempo=tempo_value, gain=gain_value)
+    
     return audio
