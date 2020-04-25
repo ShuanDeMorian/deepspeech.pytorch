@@ -1,3 +1,4 @@
+from apex.parallel import DistributedDataParallel
 import math
 from collections import OrderedDict
 
@@ -146,6 +147,7 @@ class DeepSpeech(nn.Module):
         sample_rate = self.audio_conf.get("sample_rate", 16000)
         window_size = self.audio_conf.get("window_size", 0.02)
         num_classes = len(self.labels)
+#         print('---------------------------num_classes',num_classes)
 
         self.conv = MaskConv(nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=(41, 11), stride=(2, 2), padding=(20, 5)),
@@ -248,6 +250,8 @@ class DeepSpeech(nn.Module):
     @staticmethod
     def serialize(model, optimizer=None, amp=None, epoch=None, iteration=None, loss_results=None,
                   cer_results=None, wer_results=None, avg_loss=None, meta=None):
+        if isinstance(model, DistributedDataParallel):
+            model = model.module
         package = {
             'version': model.version,
             'hidden_size': model.hidden_size,
