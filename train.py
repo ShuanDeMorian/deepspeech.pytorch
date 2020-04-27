@@ -86,6 +86,7 @@ parser.add_argument('--no-final', action='store_true', default=False,
                     help='Turn off save (better werq)final model')
 parser.add_argument('--use-jamo', action='store_true', default=False,
                     help='use jamo')
+parser.add_argument('--optimizer', type=str, default='sgd',help='optimizer')
 
 torch.manual_seed(123456)
 torch.cuda.manual_seed_all(123456)
@@ -220,18 +221,20 @@ if __name__ == '__main__':
 
     model = model.to(device)
     parameters = model.parameters()
-    optimizer = torch.optim.SGD(parameters, lr=args.lr,
-                                momentum=args.momentum, nesterov=True, weight_decay=1e-5)
     
-#     optimizer = torch.optim.Adam(parameters, lr=args.lr)
+    if args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(parameters, lr=args.lr,
+                                    momentum=args.momentum, nesterov=True, weight_decay=1e-5)
+    elif args.optimizer == 'adam':
+        optimizer = torch.optim.Adam(parameters, lr=args.lr)
 
     model, optimizer = amp.initialize(model, optimizer,
                                       opt_level=args.opt_level,
                                       keep_batchnorm_fp32=args.keep_batchnorm_fp32,
                                       loss_scale=args.loss_scale)
 
-#     if optim_state is not None:
-#         optimizer.load_state_dict(optim_state)
+    if args.optimizer == 'sgd' and optim_state is not None:
+        optimizer.load_state_dict(optim_state)
 
     if amp_state is not None:
         amp.load_state_dict(amp_state)
