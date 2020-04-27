@@ -25,7 +25,12 @@ windows = {'hamming': scipy.signal.hamming, 'hann': scipy.signal.hann, 'blackman
 def load_audio(path):
 #     sample_rate, sound = read(path)
     sound, sr = librosa.load(path, sr=16000)
-    sound = sound.astype('float32') / 32767  # normalize audio
+#     librosa.output.write_wav('org.wav', sound, sr)
+#     print('save 1')
+#     sound = sound.astype('float32') / 32767  # normalize audio
+    sound = sound.astype('float32')  # librosa doesn't need normalize
+#     librosa.output.write_wav('norm.wav', sound, sr)
+#     print('save 2')
     if len(sound.shape) > 1:
         if sound.shape[1] == 1:
             sound = sound.squeeze()
