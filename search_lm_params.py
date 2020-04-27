@@ -34,7 +34,8 @@ if args.lm_path is None:
 
 model = DeepSpeech.load_model(args.model_path)
 
-saved_output = np.load(args.saved_output)
+saved_output = np.load(args.saved_output,allow_pickle=True)
+# saved_output = torch.load(args.saved_output)
 
 
 def init(beam_width, blank_index, lm_path):

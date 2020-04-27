@@ -60,7 +60,7 @@ parser.add_argument('--speed-volume-perturb', dest='speed_volume_perturb', actio
 parser.add_argument('--spec-augment', dest='spec_augment', action='store_true', help='Use simple spectral augmentation on mel spectograms.')
 parser.add_argument('--noise-dir', default=None,
                     help='Directory to inject noise into audio. If default, noise Inject not added')
-parser.add_argument('--noise-prob', default=0.4, help='Probability of noise being added per sample')
+parser.add_argument('--noise-prob', default=0.4,type=float, help='Probability of noise being added per sample')
 parser.add_argument('--noise-min', default=0.0,
                     help='Minimum noise level to sample from. (1.0 means all noise, not original signal)', type=float)
 parser.add_argument('--noise-max', default=0.5,
@@ -88,6 +88,11 @@ parser.add_argument('--loss-scale', default=1,
 # horovod
 parser.add_argument('--use_adasum', default=False, help='horovod use adasum')
 parser.add_argument('--fp16_allreduce', default=False, help='horovod fp16_allreduce')
+
+# anneal per epoch
+parser.add_argument('--lr_anneal', default=1, type=int, help='Annealing applied to learning rate (lr_anneal) epoch')
+
+parser.add_argument('--only_eval', default=False, help='only_eval')
 
 
 torch.manual_seed(123456)
@@ -155,7 +160,7 @@ if __name__ == '__main__':
 
     loss_results, cer_results, wer_results = torch.Tensor(args.epochs), torch.Tensor(args.epochs), torch.Tensor(
         args.epochs)
-    best_wer = None
+    best_cer = None
     if main_proc and args.visdom:
         visdom_logger = VisdomLogger(args.id, args.epochs)
     if main_proc and args.tensorboard:
@@ -168,6 +173,10 @@ if __name__ == '__main__':
         model = DeepSpeech.load_model_package(package)
         labels = model.labels
         audio_conf = model.audio_conf
+        ####
+#         audio_conf['window_size'] = 0.01
+#         model.audio_conf = audio_conf
+        ###
         if not args.finetune:  # Don't want to restart training
             optim_state = package['optim_dict']
 #             amp_state = package['amp']
@@ -181,7 +190,8 @@ if __name__ == '__main__':
             avg_loss = int(package.get('avg_loss', 0))
             loss_results, cer_results, wer_results = package['loss_results'], package['cer_results'], \
                                                      package['wer_results']
-            best_wer = wer_results[start_epoch]
+#             best_wer = wer_results[start_epoch]
+            best_cer = cer_results[start_epoch]
             if main_proc and args.visdom:  # Add previous scores to visdom graph
                 visdom_logger.load_previous_values(start_epoch, package)
             if main_proc and args.tensorboard:  # Previous scores to tensorboard logs
@@ -246,6 +256,7 @@ if __name__ == '__main__':
         
     # By default, Adasum doesn't need scaling up learning rate.
     lr_scaler = hvd.size() if not args.use_adasum else 1
+#     lr_scaler = 1
 
     model = model.to(device)
     
@@ -256,8 +267,10 @@ if __name__ == '__main__':
     
     parameters = model.parameters()
     # Horovod: scale learning rate by lr_scaler.
-    optimizer = torch.optim.SGD(parameters, lr=args.lr * lr_scaler,
-                                momentum=args.momentum, nesterov=True, weight_decay=1e-5)
+#     optimizer = torch.optim.SGD(parameters, lr=args.lr * lr_scaler,
+#                                 momentum=args.momentum, nesterov=True, weight_decay=1e-5)
+    
+    optimizer = torch.optim.Adam(parameters, lr=args.lr * lr_scaler, weight_decay=1e-5)
 
 #     model, optimizer = amp.initialize(model, optimizer,
 #                                       opt_level=args.opt_level,
@@ -302,6 +315,28 @@ if __name__ == '__main__':
             tensor = torch.tensor(val)
             avg_tensor = hvd.allreduce(tensor, name=name)
             return avg_tensor.item()
+        
+        
+    if args.only_eval:
+        print('eval start')
+        epoch = 0
+        with torch.no_grad():
+            wer, cer, output_data = evaluate(test_loader=test_loader,
+                                             device=device,
+                                             model=model,
+                                             decoder=decoder,
+                                             target_decoder=decoder,
+                                             horovod=True)
+        loss_results[epoch] = avg_loss
+        wer_results[epoch] = wer
+        cer_results[epoch] = cer
+        print('Validation Summary Epoch: [{0}]\t'
+              'Average WER {wer:.3f}\t'
+              'Average CER {cer:.3f}\t'.format(
+            epoch + 1, wer=wer, cer=cer))
+        
+        import sys
+        sys.exit()
 
     for epoch in range(start_epoch, args.epochs):
         model.train()
@@ -310,6 +345,7 @@ if __name__ == '__main__':
         
         # Horovod: set epoch to sampler for shuffling.
 #         train_sampler.set_epoch(epoch)
+        
         
         for i, (data) in enumerate(train_loader, start=start_iter):
             if i == len(train_sampler):
@@ -367,7 +403,8 @@ if __name__ == '__main__':
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'.format(
                     (epoch + 1), (i + 1), len(train_sampler), batch_time=batch_time, data_time=data_time, loss=losses))
             if args.checkpoint_per_batch > 0 and i > 0 and (i + 1) % args.checkpoint_per_batch == 0 and main_proc:
-                file_path = '%s/deepspeech_checkpoint_epoch_%d_iter_%d.pth' % (save_folder, epoch + 1, i + 1)
+#                 file_path = '%s/deepspeech_checkpoint_epoch_%d_iter_%d.pth' % (save_folder, epoch + 1, i + 1)
+                file_path = '%s/deepspeech_checkpoint_iter_%d.pth' % (save_folder, i + 1)
                 print("Saving checkpoint model to %s" % file_path)
                 torch.save(DeepSpeech.serialize(model, optimizer=optimizer, amp=amp, epoch=epoch, iteration=i,
                                                 loss_results=loss_results,
@@ -412,24 +449,30 @@ if __name__ == '__main__':
                 'Avg WER': wer,
                 'Avg CER': cer
             }
+            
+#         wer = 0
         
 
         if main_proc and args.checkpoint:
-            file_path = '%s/deepspeech_%d.pth.tar' % (save_folder, epoch + 1)
-            torch.save(DeepSpeech.serialize(model, optimizer=optimizer, amp=amp, epoch=epoch, loss_results=loss_results,
-                                            wer_results=wer_results, cer_results=cer_results),
-                       file_path)
+            if epoch != 0 and epoch % 10 == 0:
+    #             file_path = '%s/deepspeech_%d.pth.tar' % (save_folder, epoch + 1)
+                file_path = '%s/deepspeech_latest.pth' % (save_folder)
+                torch.save(DeepSpeech.serialize(model, optimizer=optimizer, amp=amp, epoch=epoch, loss_results=loss_results,
+                                                wer_results=wer_results, cer_results=cer_results),
+                           file_path)
         # anneal lr
-        for g in optimizer.param_groups:
-            g['lr'] = g['lr'] / args.learning_anneal
-        print('Learning rate annealed to: {lr:.6f}'.format(lr=g['lr']))
+        if epoch != 0 and epoch % args.lr_anneal == 0:
+            for g in optimizer.param_groups:
+                g['lr'] = g['lr'] / args.learning_anneal
+            print('Learning rate annealed to: {lr:.6f}'.format(lr=g['lr']))
 
-        if main_proc and (best_wer is None or best_wer > wer):
+        # best wer -> best cer 
+        if main_proc and (best_cer is None or best_cer > cer):
             print("Found better validated model, saving to %s" % args.model_path)
             torch.save(DeepSpeech.serialize(model, optimizer=optimizer, amp=amp, epoch=epoch, loss_results=loss_results,
                                             wer_results=wer_results, cer_results=cer_results)
                        , args.model_path)
-            best_wer = wer
+            best_cer = cer
             avg_loss = 0
 
         if not args.no_shuffle:

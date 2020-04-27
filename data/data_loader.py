@@ -121,6 +121,9 @@ class SpectrogramParser(AudioParser):
         else:
             y = load_audio(audio_path)
             
+#         librosa.output.write_wav('y1.wav', y, sr=16000)
+#         print('save@@@@@@@@@@@@')   
+            
         # change audio speed
         if change_speed is not None:
             y = librosa.effects.time_stretch(y, change_speed)
@@ -129,6 +132,12 @@ class SpectrogramParser(AudioParser):
             add_noise = np.random.binomial(1, self.noise_prob)
             if add_noise:
                 y = self.noiseInjector.inject_noise(y)
+                
+#         librosa.output.write_wav('y2.wav', y, sr=16000)
+#         print('save@@@@@@@@@@@@')    
+#         import sys
+#         sys.exit()
+        
         n_fft = int(self.sample_rate * self.window_size)
         win_length = n_fft
         hop_length = int(self.sample_rate * self.window_stride)
