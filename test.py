@@ -45,10 +45,17 @@ def evaluate(test_loader, device, model, decoder, target_decoder, save_output=No
         for size in target_sizes:
             split_targets.append(targets[offset:offset + size])
             offset += size
+            
+        rm_rep = True
+#         try:
+#             if model.audio_conf['use_jamo']:
+#                 rm_rep = False
+#         except:
+#             None            
 
         out, output_sizes = model(inputs, input_sizes)
 
-        decoded_output, _ = decoder.decode(out, output_sizes)
+        decoded_output, _ = decoder.decode(out, output_sizes,remove_repetitions=rm_rep)
         target_strings = target_decoder.convert_to_strings(split_targets)
 
         if save_output is not None:
@@ -86,6 +93,8 @@ if __name__ == '__main__':
     torch.set_grad_enabled(False)
     device = torch.device("cuda" if args.cuda else "cpu")
     model = load_model(device, args.model_path, args.half)
+    
+    model.audio_conf['noise_dir'] = None
 
     if args.decoder == "beam":
         from decoder import BeamCTCDecoder

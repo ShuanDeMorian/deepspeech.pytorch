@@ -101,6 +101,8 @@ if __name__ == '__main__':
     else:
         decoder = GreedyDecoder(model.labels, blank_index=model.labels.index('_'))
 
+    model.audio_conf['noise_dir'] = None        
+        
     spect_parser = SpectrogramParser(model.audio_conf, normalize=True)
     
     try:
