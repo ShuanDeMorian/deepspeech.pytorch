@@ -235,6 +235,8 @@ if __name__ == '__main__':
 
     if args.optimizer == 'sgd' and optim_state is not None:
         optimizer.load_state_dict(optim_state)
+        
+    print('optim state',optim_state)
 
     if amp_state is not None:
         amp.load_state_dict(amp_state)
